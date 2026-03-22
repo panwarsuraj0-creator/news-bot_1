@@ -236,10 +236,3 @@ if __name__ == "__main__":
     log.info("DRY RUN mode: " + str(dry_run))
 
     run_bot_cycle()
-
-    schedule.every(1).hours.do(run_bot_cycle)
-
-    log.info("Scheduler running. Press Ctrl+C to stop.")
-    while True:
-        schedule.run_pending()
-        time.sleep(30)
