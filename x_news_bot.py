@@ -1,10 +1,11 @@
 import os
+import json
 import time
 import logging
 import requests
 import feedparser
 from groq import Groq
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -19,6 +20,34 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+POSTED_TITLES_FILE = "posted_titles.json"
+
+
+def load_posted_titles():
+    try:
+        with open(POSTED_TITLES_FILE, "r") as f:
+            data = json.load(f)
+            saved_time = datetime.fromisoformat(data["saved_at"])
+            if datetime.now(timezone.utc) - saved_time < timedelta(hours=24):
+                log.info("Loaded " + str(len(data["titles"])) + " posted titles from file")
+                return set(data["titles"])
+            else:
+                log.info("Posted titles older than 24 hours — resetting")
+                return set()
+    except Exception:
+        return set()
+
+
+def save_posted_titles(titles):
+    try:
+        with open(POSTED_TITLES_FILE, "w") as f:
+            json.dump({
+                "saved_at": datetime.now(timezone.utc).isoformat(),
+                "titles": list(titles)
+            }, f)
+    except Exception as e:
+        log.warning("Could not save posted titles: " + str(e))
+
 
 def get_groq_client():
     return Groq(api_key=os.getenv("GROQ_API_KEY"))
@@ -30,7 +59,7 @@ def send_telegram_message(text):
     dry_run = os.getenv("DRY_RUN", "false").lower() == "true"
 
     if dry_run:
-        log.info("[DRY RUN] Would post to Telegram: " + text)
+        log.info("[DRY RUN] Would post to Telegram:\n" + text)
         return True
 
     url = "https://api.telegram.org/bot" + token + "/sendMessage"
@@ -60,7 +89,6 @@ RSS_FEEDS = {
     "Indian Companies": "https://economictimes.indiatimes.com/markets/stocks/rssfeeds/2146842.cms",
     "Commodities": "https://economictimes.indiatimes.com/markets/commodities/rssfeeds/1808152121.cms",
     "Global Markets": "https://feeds.bloomberg.com/markets/news.rss",
-    "US Weather Energy": "https://feeds.feedburner.com/ndtvnews-energy",
 }
 
 NEWSAPI_CATEGORIES = {
@@ -110,7 +138,7 @@ def fetch_rss_headlines(max_per_feed=3):
                 headlines.append({
                     "category": category,
                     "title": entry.get("title", ""),
-                    "summary": entry.get("summary", "")[:300],
+                    "summary": entry.get("summary", "")[:500],
                     "source": "RSS",
                     "url": entry.get("link", ""),
                 })
@@ -158,7 +186,7 @@ def fetch_newsapi_headlines(max_per_category=2):
                 headlines.append({
                     "category": category,
                     "title": title,
-                    "summary": art.get("description", "")[:300],
+                    "summary": art.get("description", "")[:500],
                     "source": "NewsAPI",
                     "url": art.get("url", ""),
                 })
@@ -195,7 +223,7 @@ def fetch_newsapi_headlines(max_per_category=2):
                 headlines.append({
                     "category": category,
                     "title": title,
-                    "summary": art.get("description", "")[:300],
+                    "summary": art.get("description", "")[:500],
                     "source": "NewsAPI",
                     "url": art.get("url", ""),
                 })
@@ -209,10 +237,41 @@ def fetch_newsapi_headlines(max_per_category=2):
     return headlines
 
 
-posted_titles = set()
+def fetch_full_article(url):
+    try:
+        resp = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+        text = resp.text
+        from html.parser import HTMLParser
+
+        class TextExtractor(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.text = []
+                self.skip = False
+
+            def handle_starttag(self, tag, attrs):
+                if tag in ["script", "style", "nav", "footer"]:
+                    self.skip = True
+
+            def handle_endtag(self, tag):
+                if tag in ["script", "style", "nav", "footer"]:
+                    self.skip = False
+
+            def handle_data(self, data):
+                if not self.skip:
+                    self.text.append(data.strip())
+
+        parser = TextExtractor()
+        parser.feed(text)
+        full_text = " ".join([t for t in parser.text if t])[:3000]
+        return full_text
+    except Exception as e:
+        log.warning("Could not fetch full article: " + str(e))
+        return ""
 
 
-def deduplicate(headlines):
+def deduplicate(headlines, posted_titles):
     seen = set()
     unique = []
     for h in headlines:
@@ -227,6 +286,9 @@ def summarize_to_post(client, headline):
     category = headline["category"]
     emoji = CATEGORY_EMOJI.get(category, "📰")
 
+    full_text = fetch_full_article(headline["url"])
+    content = full_text if full_text else headline["summary"]
+
     market_categories = [
         "Indian Market", "Indian Economy", "Indian Companies",
         "RBI Policy", "Global Markets", "Commodities", "US Weather Energy"
@@ -234,41 +296,67 @@ def summarize_to_post(client, headline):
 
     if category in market_categories:
         prompt = (
-            "You are a financial news analyst. Summarize this news in max 200 characters. "
-            "Mention the market impact clearly (positive/negative/neutral). "
-            "Be factual and concise. No hashtags or emojis. "
-            "Output ONLY the summary. Nothing else.\n\n"
-            "Headline: " + headline["title"] + "\n"
-            "Context: " + headline["summary"]
+            "You are a financial news analyst. Read this news and give a smart summary.\n"
+            "Format your response as 5-6 key bullet points.\n"
+            "Each bullet point should be one clear insight.\n"
+            "Mention market impact (positive/negative/neutral) in last bullet.\n"
+            "No hashtags, no links, no emojis.\n\n"
+            "News: " + content
         )
     else:
         prompt = (
-            "Write a short news update about this story. "
-            "Max 200 characters. Factual and punchy tone. "
-            "No hashtags or emojis. "
-            "Output ONLY the summary. Nothing else.\n\n"
-            "Headline: " + headline["title"] + "\n"
-            "Context: " + headline["summary"]
+            "Read this news and give a smart summary.\n"
+            "Format your response as 5-6 key bullet points.\n"
+            "Each bullet point should be one clear and important fact.\n"
+            "Be factual, concise and informative.\n"
+            "No hashtags, no links, no emojis.\n\n"
+            "News: " + content
         )
 
     try:
         response = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=200,
+            max_tokens=400,
         )
         summary = response.choices[0].message.content.strip()
-        url = headline.get("url", "")
-        post = emoji + " <b>" + category + "</b>\n\n" + summary + "\n\n" + url
+        post = emoji + " <b>" + category + "</b>\n<b>" + headline["title"] + "</b>\n\n" + summary
         return post
     except Exception as e:
         log.error("Groq summarization failed: " + str(e))
         return None
 
 
+def is_paused():
+    ist_offset = 5.5 * 3600
+    now_ist = datetime.fromtimestamp(
+        datetime.now(timezone.utc).timestamp() + ist_offset
+    )
+    weekday = now_ist.weekday()
+    hour = now_ist.hour
+    minute = now_ist.minute
+    time_in_minutes = hour * 60 + minute
+
+    saturday_start = 10 * 60
+    sunday_end = 18 * 60
+
+    if weekday == 5 and time_in_minutes >= saturday_start:
+        log.info("Weekend pause active (Sat 10AM - Sun 6PM IST). Skipping.")
+        return True
+    if weekday == 6 and time_in_minutes <= sunday_end:
+        log.info("Weekend pause active (Sat 10AM - Sun 6PM IST). Skipping.")
+        return True
+    if hour >= 23 or hour < 6:
+        log.info("Night pause active (11PM - 6AM IST). Skipping.")
+        return True
+
+    return False
+
+
 def run_bot_cycle():
     log.info("Bot cycle starting at " + datetime.now(timezone.utc).isoformat())
 
+    posted_titles = load_posted_titles()
     groq = get_groq_client()
 
     all_headlines = []
@@ -277,7 +365,7 @@ def run_bot_cycle():
 
     log.info("Total raw headlines fetched: " + str(len(all_headlines)))
 
-    unique = deduplicate(all_headlines)
+    unique = deduplicate(all_headlines, posted_titles)
     log.info("After deduplication: " + str(len(unique)) + " headlines")
 
     SOURCE_PRIORITY = {"NewsAPI": 0, "RSS": 1}
@@ -300,34 +388,8 @@ def run_bot_cycle():
             posted += 1
         time.sleep(5)
 
+    save_posted_titles(posted_titles)
     log.info("Cycle complete. Posted " + str(posted) + "/" + str(len(category_best)) + " messages.")
-
-
-def is_paused():
-    ist_offset = 5.5 * 3600
-    now_ist = datetime.fromtimestamp(
-        datetime.now(timezone.utc).timestamp() + ist_offset
-    )
-    weekday = now_ist.weekday()
-    hour = now_ist.hour
-    minute = now_ist.minute
-    time_in_minutes = hour * 60 + minute
-
-    saturday_start = 10 * 60
-    sunday_end = 18 * 60
-
-    if weekday == 5 and time_in_minutes >= saturday_start:
-        log.info("Weekend pause active (Sat 10AM - Sun 6PM IST). Skipping this run.")
-        return True
-    if weekday == 6 and time_in_minutes <= sunday_end:
-        log.info("Weekend pause active (Sat 10AM - Sun 6PM IST). Skipping this run.")
-        return True
-
-    if hour >= 23 or hour < 6:
-        log.info("Night pause active (11PM - 6AM IST). Skipping this run.")
-        return True
-
-    return False
 
 
 if __name__ == "__main__":
@@ -336,6 +398,6 @@ if __name__ == "__main__":
     log.info("DRY RUN mode: " + str(dry_run))
 
     if is_paused():
-        log.info("Weekend pause active (Sat 10AM - Sun 6PM IST). Skipping this run.")
+        log.info("Bot is paused. Exiting.")
     else:
         run_bot_cycle()
