@@ -303,8 +303,32 @@ def run_bot_cycle():
     log.info("Cycle complete. Posted " + str(posted) + "/" + str(len(category_best)) + " messages.")
 
 
+def is_paused():
+    ist_offset = 5.5 * 3600
+    now_ist = datetime.fromtimestamp(
+        datetime.now(timezone.utc).timestamp() + ist_offset
+    )
+    weekday = now_ist.weekday()
+    hour = now_ist.hour
+    minute = now_ist.minute
+    time_in_minutes = hour * 60 + minute
+
+    saturday_start = 10 * 60
+    sunday_end = 18 * 60
+
+    if weekday == 5 and time_in_minutes >= saturday_start:
+        return True
+    if weekday == 6 and time_in_minutes <= sunday_end:
+        return True
+    return False
+
+
 if __name__ == "__main__":
     dry_run = os.getenv("DRY_RUN", "false").lower() == "true"
     log.info("News Bot starting up...")
     log.info("DRY RUN mode: " + str(dry_run))
-    run_bot_cycle()
+
+    if is_paused():
+        log.info("Weekend pause active (Sat 10AM - Sun 6PM IST). Skipping this run.")
+    else:
+        run_bot_cycle()
