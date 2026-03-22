@@ -1,7 +1,6 @@
 import os
 import time
 import logging
-import schedule
 import requests
 import feedparser
 from groq import Groq
@@ -56,6 +55,12 @@ RSS_FEEDS = {
     "Tech and AI": "https://feeds.feedburner.com/TechCrunch",
     "Politics": "https://rss.nytimes.com/services/xml/rss/nyt/Politics.xml",
     "Business": "https://feeds.bloomberg.com/markets/news.rss",
+    "Indian Market": "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms",
+    "Indian Economy": "https://economictimes.indiatimes.com/economy/rssfeeds/1373380680.cms",
+    "Indian Companies": "https://economictimes.indiatimes.com/markets/stocks/rssfeeds/2146842.cms",
+    "Commodities": "https://economictimes.indiatimes.com/markets/commodities/rssfeeds/1808152121.cms",
+    "Global Markets": "https://feeds.bloomberg.com/markets/news.rss",
+    "US Weather Energy": "https://feeds.feedburner.com/ndtvnews-energy",
 }
 
 NEWSAPI_CATEGORIES = {
@@ -64,6 +69,15 @@ NEWSAPI_CATEGORIES = {
     "Tech and AI": "technology",
     "Politics": "general",
     "Business": "business",
+}
+
+NEWSAPI_QUERIES = {
+    "Indian Market": "NSE BSE Sensex Nifty stock market India",
+    "RBI Policy": "RBI Reserve Bank India interest rate policy",
+    "Indian Companies": "India earnings results Reliance TCS Infosys HDFC",
+    "Global Markets": "global markets stocks bonds impact economy",
+    "Commodities": "gold silver crude oil commodity prices",
+    "US Weather Energy": "USA weather natural gas energy prices impact",
 }
 
 POLITICS_KEYWORDS = [
@@ -77,6 +91,13 @@ CATEGORY_EMOJI = {
     "Tech and AI": "🤖",
     "Politics": "🏛",
     "Business": "💼",
+    "Indian Market": "📈",
+    "Indian Economy": "🇮🇳",
+    "Indian Companies": "🏢",
+    "RBI Policy": "🏦",
+    "Global Markets": "🌐",
+    "Commodities": "🥇",
+    "US Weather Energy": "⛽",
 }
 
 
@@ -148,6 +169,43 @@ def fetch_newsapi_headlines(max_per_category=2):
         except Exception as e:
             log.warning("NewsAPI failed " + category + ": " + str(e))
 
+    for category, query in NEWSAPI_QUERIES.items():
+        try:
+            params = {
+                "apiKey": api_key,
+                "q": query,
+                "language": "en",
+                "sortBy": "publishedAt",
+                "pageSize": max_per_category * 2,
+            }
+            resp = requests.get(
+                "https://newsapi.org/v2/everything",
+                params=params,
+                timeout=10
+            )
+            resp.raise_for_status()
+            articles = resp.json().get("articles", [])
+
+            count = 0
+            for art in articles:
+                title = art.get("title", "")
+                if not title or title in seen_titles:
+                    continue
+                seen_titles.add(title)
+                headlines.append({
+                    "category": category,
+                    "title": title,
+                    "summary": art.get("description", "")[:300],
+                    "source": "NewsAPI",
+                    "url": art.get("url", ""),
+                })
+                count += 1
+                if count >= max_per_category:
+                    break
+            log.info("NewsAPI query " + category + ": fetched " + str(count) + " items")
+        except Exception as e:
+            log.warning("NewsAPI query failed " + category + ": " + str(e))
+
     return headlines
 
 
@@ -168,15 +226,30 @@ def deduplicate(headlines):
 def summarize_to_post(client, headline):
     category = headline["category"]
     emoji = CATEGORY_EMOJI.get(category, "📰")
-    prompt = (
-        "Write a short news update about this story. "
-        "Max 200 characters for the main text. "
-        "Factual and punchy tone. "
-        "Do not add hashtags or emojis. "
-        "Output ONLY the summary text. Nothing else.\n\n"
-        "Headline: " + headline["title"] + "\n"
-        "Context: " + headline["summary"]
-    )
+
+    market_categories = [
+        "Indian Market", "Indian Economy", "Indian Companies",
+        "RBI Policy", "Global Markets", "Commodities", "US Weather Energy"
+    ]
+
+    if category in market_categories:
+        prompt = (
+            "You are a financial news analyst. Summarize this news in max 200 characters. "
+            "Mention the market impact clearly (positive/negative/neutral). "
+            "Be factual and concise. No hashtags or emojis. "
+            "Output ONLY the summary. Nothing else.\n\n"
+            "Headline: " + headline["title"] + "\n"
+            "Context: " + headline["summary"]
+        )
+    else:
+        prompt = (
+            "Write a short news update about this story. "
+            "Max 200 characters. Factual and punchy tone. "
+            "No hashtags or emojis. "
+            "Output ONLY the summary. Nothing else.\n\n"
+            "Headline: " + headline["title"] + "\n"
+            "Context: " + headline["summary"]
+        )
 
     try:
         response = client.chat.completions.create(
@@ -199,8 +272,8 @@ def run_bot_cycle():
     groq = get_groq_client()
 
     all_headlines = []
-    all_headlines += fetch_rss_headlines(max_per_feed=5)
-    all_headlines += fetch_newsapi_headlines(max_per_category=3)
+    all_headlines += fetch_rss_headlines(max_per_feed=3)
+    all_headlines += fetch_newsapi_headlines(max_per_category=2)
 
     log.info("Total raw headlines fetched: " + str(len(all_headlines)))
 
@@ -234,5 +307,4 @@ if __name__ == "__main__":
     dry_run = os.getenv("DRY_RUN", "false").lower() == "true"
     log.info("News Bot starting up...")
     log.info("DRY RUN mode: " + str(dry_run))
-
     run_bot_cycle()
