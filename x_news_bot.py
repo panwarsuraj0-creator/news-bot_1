@@ -317,9 +317,16 @@ def is_paused():
     sunday_end = 18 * 60
 
     if weekday == 5 and time_in_minutes >= saturday_start:
+        log.info("Weekend pause active (Sat 10AM - Sun 6PM IST). Skipping this run.")
         return True
     if weekday == 6 and time_in_minutes <= sunday_end:
+        log.info("Weekend pause active (Sat 10AM - Sun 6PM IST). Skipping this run.")
         return True
+
+    if hour >= 23 or hour < 6:
+        log.info("Night pause active (11PM - 6AM IST). Skipping this run.")
+        return True
+
     return False
 
 
