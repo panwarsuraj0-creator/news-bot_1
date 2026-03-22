@@ -20,7 +20,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install groq requests feedparser python-dotenv
+          pip install groq requests feedparser python-dotenv schedule
 
       - name: Run bot
         env:
